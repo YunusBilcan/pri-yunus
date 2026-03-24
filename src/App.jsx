@@ -4,7 +4,7 @@ import { nanoid } from 'nanoid';
 import { Shield, Send, Link as LinkIcon, XCircle, Lock, User, CheckCircle } from 'lucide-react';
 import { generateRoomKey, encryptMessage, decryptMessage } from './utils/crypto';
 
-const SOCKET_URL = 'http://localhost:3001';
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001';
 
 function App() {
   const [room, setRoom] = useState(null);
