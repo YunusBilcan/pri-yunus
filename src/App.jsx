@@ -1,61 +1,83 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { io } from 'socket.io-client';
-import { nanoid } from 'nanoid';
-import { Shield, Send, Link as LinkIcon, XCircle, Lock, User, CheckCircle } from 'lucide-react';
+import { Peer } from 'peerjs';
+import { Shield, Send, Link as LinkIcon, XCircle, Lock, User, CheckCircle, Wifi, WifiOff } from 'lucide-react';
 import { generateRoomKey, encryptMessage, decryptMessage } from './utils/crypto';
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001';
-
 function App() {
-  const [room, setRoom] = useState(null);
+  const [peer, setPeer] = useState(null);
+  const [conn, setConn] = useState(null);
+  const [peerId, setPeerId] = useState(null);
+  const [targetPeerId, setTargetPeerId] = useState(null);
   const [key, setKey] = useState(null);
-  const [isHost, setIsHost] = useState(false);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
-  const [socket, setSocket] = useState(null);
   const [isRevoked, setIsRevoked] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
+  const [error, setError] = useState(null);
   
   const messagesEndRef = useRef(null);
 
-  // Initialize from URL
+  // Initialize Peer
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const roomId = params.get('room');
+    const remotePeerId = params.get('p');
     const hashKey = window.location.hash.slice(1);
 
-    if (roomId && hashKey) {
-      setRoom(roomId);
-      setKey(hashKey);
-      setIsHost(false);
-    }
-  }, []);
+    const newPeer = new Peer();
+    
+    newPeer.on('open', (id) => {
+      setPeerId(id);
+      if (remotePeerId && hashKey) {
+        setTargetPeerId(remotePeerId);
+        setKey(hashKey);
+        // Connect to host
+        const connection = newPeer.connect(remotePeerId);
+        setupConnection(connection, hashKey);
+      }
+    });
 
-  // Socket Connection
-  useEffect(() => {
-    if (room && key) {
-      const newSocket = io(SOCKET_URL);
-      setSocket(newSocket);
+    newPeer.on('error', (err) => {
+      console.error('Peer error:', err);
+      setError('Bağlantı hatası oluştu. Lütfen sayfayı yenileyin.');
+    });
 
-      newSocket.emit('join-room', room);
+    newPeer.on('connection', (connection) => {
+      // Host receives connection
+      if (isRevoked) {
+        connection.close();
+        return;
+      }
+      setupConnection(connection, key);
+    });
 
-      newSocket.on('receive-message', async (encryptedData) => {
-        const decrypted = await decryptMessage(encryptedData, key);
-        setMessages((prev) => [...prev, { text: decrypted, sender: 'other', timestamp: new Date() }]);
-      });
+    setPeer(newPeer);
 
-      newSocket.on('room-revoked', () => {
+    return () => newPeer.destroy();
+  }, [isRevoked, key]);
+
+  const setupConnection = (c, encryptionKey) => {
+    setConn(c);
+    
+    c.on('open', () => {
+      setIsConnected(true);
+    });
+
+    c.on('data', async (data) => {
+      if (data === 'REVOKE') {
         setIsRevoked(true);
-      });
+        c.close();
+        return;
+      }
+      
+      const decrypted = await decryptMessage(data, encryptionKey);
+      setMessages((prev) => [...prev, { text: decrypted, sender: 'other', timestamp: new Date() }]);
+    });
 
-      newSocket.on('error', (msg) => {
-        alert(msg);
-        window.location.href = '/';
-      });
-
-      return () => newSocket.close();
-    }
-  }, [room, key]);
+    c.on('close', () => {
+      setIsConnected(false);
+    });
+  };
 
   // Auto Scroll
   useEffect(() => {
@@ -63,59 +85,58 @@ function App() {
   }, [messages]);
 
   const handleCreateRoom = async () => {
-    const roomId = nanoid(10);
     const roomKey = await generateRoomKey();
-    
-    setRoom(roomId);
     setKey(roomKey);
-    setIsHost(true);
-
-    // Update URL without refresh
-    const newUrl = `${window.location.origin}/?room=${roomId}#${roomKey}`;
+    // Update URL with our ID and Key
+    const newUrl = `${window.location.origin}/?p=${peerId}#${roomKey}`;
     window.history.replaceState(null, '', newUrl);
   };
 
   const handleSendMessage = async (e) => {
     e.preventDefault();
-    if (!input.trim() || !socket || isRevoked) return;
+    if (!input.trim() || !conn || isRevoked) return;
 
     const encrypted = await encryptMessage(input, key);
-    socket.emit('send-message', { roomId: room, message: encrypted });
+    conn.send(encrypted);
     
     setMessages((prev) => [...prev, { text: input, sender: 'me', timestamp: new Date() }]);
     setInput('');
   };
 
   const handleRevoke = () => {
-    if (socket && isHost) {
-      socket.emit('revoke-room', room);
-      setIsRevoked(true);
+    if (conn) {
+      conn.send('REVOKE');
+      conn.close();
     }
+    setIsRevoked(true);
   };
 
   const copyLink = () => {
-    const url = `${window.location.origin}/?room=${room}#${key}`;
+    const url = `${window.location.origin}/?p=${peerId}#${key}`;
     navigator.clipboard.writeText(url);
     setCopySuccess(true);
     setTimeout(() => setCopySuccess(false), 2000);
   };
 
-  if (!room) {
+  if (error) {
+    return <div className="glass" style={{ padding: '2rem', textAlign: 'center' }}>{error}</div>;
+  }
+
+  if (!key) {
     return (
       <div className="glass" style={{ padding: '3rem', textAlign: 'center', maxWidth: '500px', margin: 'auto' }}>
         <div style={{ background: 'var(--primary-glow)', width: '80px', height: '80px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifySelf: 'center', marginBottom: '1.5rem', color: 'var(--primary)' }}>
           <Shield size={48} style={{ margin: 'auto' }} />
         </div>
-        <h1>X-Private Chat</h1>
+        <h1>X-Private P2P Chat</h1>
         <p style={{ marginBottom: '2rem' }}>
-          Secure, encrypted, and disposable communication. Create a private link and share it with someone.
+          Şifreli ve Merkeziyetsiz Sohbet. Bir link oluşturun ve doğrudan eşinizle (P2P) konuşun.
         </p>
-        <button onClick={handleCreateRoom} className="btn" style={{ width: '100%', justifyContent: 'center', filter: 'none' }}>
-          <Lock size={18} /> Generate Secure Link
+        <button onClick={handleCreateRoom} className="btn" style={{ width: '100%', justifyContent: 'center' }} disabled={!peerId}>
+          {peerId ? <><Lock size={18} /> Güvenli Link Oluştur</> : 'Ağ Hazırlanıyor...'}
         </button>
         <p style={{ marginTop: '1.5rem', fontSize: '0.8rem' }}>
-          * Sistemde veritabanı bulunmamaktadır. Şifreleme anahtarı `#` (hash) kısmında saklanır ve asla sunucuya gitmez.
-          Oturum kapandığında veya 1 saat sonunda tüm veriler (bellekten bile) silinir.
+          * Veritabanı yok. Sunucu yok. Mesajlar sadece tarayıcılar arası (P2P) iletilir. %100 Vercel uyumlu.
         </p>
       </div>
     );
@@ -127,20 +148,21 @@ function App() {
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
           <Shield size={24} color="var(--primary)" />
           <div>
-            <div style={{ fontSize: '1rem', fontWeight: '700' }}>Private Session</div>
-            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-              {isHost ? 'Host Mode (Revocable)' : 'Guest Mode'}
+            <div style={{ fontSize: '1rem', fontWeight: '700' }}>Gizli P2P Oturumu</div>
+            <div style={{ fontSize: '0.75rem', color: isConnected ? 'var(--success)' : 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+              {isConnected ? <Wifi size={12} /> : <WifiOff size={12} />}
+              {isConnected ? 'Bağlantı Kuruldu' : 'Bağlantı Bekleniyor...'}
             </div>
           </div>
         </div>
         <div style={{ display: 'flex', gap: '0.5rem' }}>
           <button onClick={copyLink} className="btn btn-secondary" style={{ padding: '0.5rem 1rem' }}>
             {copySuccess ? <CheckCircle size={18} /> : <LinkIcon size={18} />}
-            {copySuccess ? 'Copied' : 'Share Link'}
+            {copySuccess ? 'Kopyalandı' : 'Linki Paylaş'}
           </button>
-          {isHost && (
+          {!targetPeerId && (
             <button onClick={handleRevoke} className="btn btn-danger" style={{ padding: '0.5rem 1rem' }} disabled={isRevoked}>
-              <XCircle size={18} /> Revoke Link
+              <XCircle size={18} /> Oturumu Kapat
             </button>
           )}
         </div>
@@ -149,14 +171,14 @@ function App() {
       {isRevoked && (
         <div className="revoked-banner">
           <XCircle size={18} style={{ verticalAlign: 'middle', marginRight: '0.5rem' }} />
-          This chat session has been revoked. No further messages can be sent.
+          Bu oturum kapatıldı.
         </div>
       )}
 
       <div className="chat-messages">
         <div style={{ textAlign: 'center', padding: '1rem', opacity: 0.5, fontSize: '0.8rem' }}>
           <Lock size={12} style={{ marginRight: '0.4rem' }} />
-          End-to-End Encrypted. Only you and the recipient can read these messages.
+          Doğrudan Cihazdan Cihaza (WebRTC) Şifreli İletişim. Sunucu Devre Dışı.
         </div>
         
         {messages.map((msg, i) => (
@@ -167,18 +189,23 @@ function App() {
             </div>
           </div>
         ))}
+        {!isConnected && !isRevoked && targetPeerId && (
+          <div style={{ textAlign: 'center', padding: '1rem', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+            Karşı tarafın bağlanması bekleniyor...
+          </div>
+        )}
         <div ref={messagesEndRef} />
       </div>
 
       <form className="chat-input" onSubmit={handleSendMessage}>
         <input 
           type="text" 
-          placeholder={isRevoked ? "Session Revoked" : "Type a secure message..."}
+          placeholder={isRevoked ? "Oturum Kapalı" : isConnected ? "Şifreli mesaj yaz..." : "Bağlantı bekleniyor..."}
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          disabled={isRevoked}
+          disabled={!isConnected || isRevoked}
         />
-        <button type="submit" className="btn" disabled={isRevoked || !input.trim()}>
+        <button type="submit" className="btn" disabled={!isConnected || isRevoked || !input.trim()}>
           <Send size={18} />
         </button>
       </form>
